@@ -67,6 +67,24 @@ Manual check:
 sudo /usr/lib/glpi-agent/glpi-additional-oem-disable-old --dry-run --debug
 ```
 
+Since 0.1.3, the systemd drop-in runs the generator with `--only-if-enabled`:
+
+```ini
+ExecStartPre=/usr/lib/glpi-agent/glpi-additional-oem --only-if-enabled
+```
+
+This means the runtime JSON is generated only when GLPI Agent has an active line:
+
+```ini
+additional-content = /run/glpi-agent/additional-content.json
+```
+
+If the line is commented, the pre-start helper exits successfully and does nothing:
+
+```ini
+# additional-content = /run/glpi-agent/additional-content.json
+```
+
 ## Manual install
 
 ```bash

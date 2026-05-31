@@ -33,6 +33,7 @@ RUN_DIR="/run/glpi-agent"
 CONFIG_DIR="/etc/glpi-additional-oem"
 BAD_UUIDS_FILE="$CONFIG_DIR/bad-uuids.list"
 BAD_VALUES_FILE="$CONFIG_DIR/bad-values.list"
+GLPI_AGENT_CONF_DIR="/etc/glpi-agent"
 
 STATE_DIR="/var/lib/glpi-agent/glpi-additional-oem"
 FINGERPRINT_FILE="$STATE_DIR/hardware-fingerprint"
@@ -42,6 +43,7 @@ RESET_AGENT_STATE=1
 DRY_RUN=0
 DEBUG=0
 SHOW_CONFIG=0
+ONLY_IF_ENABLED=0
 
 usage() {
     cat <<'USAGE'
@@ -53,11 +55,13 @@ Options:
   --no-reset-state   Do not remove GLPI Agent last_state.json when hardware fingerprint changes
   --debug            Print diagnostic information to stderr and syslog
   --show-config      Show important paths
+  --only-if-enabled  Generate JSON only when GLPI Agent additional-content is enabled
   -h, --help         Show this help
 
 Files:
   /etc/glpi-additional-oem/bad-uuids.list
   /etc/glpi-additional-oem/bad-values.list
+  /etc/glpi-agent/conf.d/20-additional-oem.cfg
   /run/glpi-agent/additional-content.json
 USAGE
 }
@@ -80,6 +84,10 @@ while [[ $# -gt 0 ]]; do
             SHOW_CONFIG=1
             shift
             ;;
+        --only-if-enabled)
+            ONLY_IF_ENABLED=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -100,6 +108,8 @@ RUN_DIR=$RUN_DIR
 CONFIG_DIR=$CONFIG_DIR
 BAD_UUIDS_FILE=$BAD_UUIDS_FILE
 BAD_VALUES_FILE=$BAD_VALUES_FILE
+GLPI_AGENT_CONF_DIR=$GLPI_AGENT_CONF_DIR
+ONLY_IF_ENABLED=$ONLY_IF_ENABLED
 STATE_DIR=$STATE_DIR
 FINGERPRINT_FILE=$FINGERPRINT_FILE
 GLPI_STATE_DIR=$GLPI_STATE_DIR
@@ -160,6 +170,53 @@ strip_inline_comment() {
     # Lines starting with # are comments. Inline comments are also allowed after whitespace.
     s="$(printf '%s' "$s" | sed 's/[[:space:]]#.*$//')"
     trim_string "$s"
+}
+
+# Return 0 when an active GLPI Agent additional-content directive points to $OUT.
+# Commented lines are ignored. This is used by --only-if-enabled for systemd ExecStartPre.
+is_additional_content_enabled() {
+    local conf_dir="${1:-$GLPI_AGENT_CONF_DIR}"
+    local target="${2:-$OUT}"
+    local file
+
+    [[ -d "$conf_dir" ]] || return 1
+
+    while IFS= read -r -d '' file; do
+        awk -v target="$target" '
+            function trim(s) {
+                sub(/^[[:space:]]+/, "", s)
+                sub(/[[:space:]]+$/, "", s)
+                return s
+            }
+            function unquote(s) {
+                if (length(s) >= 2) {
+                    first = substr(s, 1, 1)
+                    last  = substr(s, length(s), 1)
+                    if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+                        return substr(s, 2, length(s) - 2)
+                    }
+                }
+                return s
+            }
+            /^[[:space:]]*#/ { next }
+            /^[[:space:]]*additional-content[[:space:]]*=/ {
+                value = $0
+                sub(/^[[:space:]]*additional-content[[:space:]]*=[[:space:]]*/, "", value)
+                sub(/[[:space:]]#.*$/, "", value)
+                value = unquote(trim(value))
+                if (value == target) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        ' "$file" && return 0
+    done < <(
+        find "$conf_dir" -maxdepth 2 -type f \
+            \( -name '*.cfg' -o -name 'agent.cfg' \) \
+            -print0 2>/dev/null
+    )
+
+    return 1
 }
 
 # Match custom bad value from bad-values.list.
@@ -605,6 +662,14 @@ reset_agent_state_if_needed() {
             -delete 2>/dev/null || true
     fi
 }
+
+if [[ "$ONLY_IF_ENABLED" -eq 1 ]]; then
+    if ! is_additional_content_enabled "$GLPI_AGENT_CONF_DIR" "$OUT"; then
+        log "additional-content is disabled or not pointing to $OUT; skipping JSON generation"
+        [[ "$DEBUG" -eq 1 ]] && echo "OK: additional-content is disabled; nothing to generate" >&2
+        exit 0
+    fi
+fi
 
 if [[ "$DRY_RUN" -eq 0 && "${EUID:-$(id -u)}" -ne 0 ]]; then
     echo "ERROR: run as root to write /run and /var/lib files" >&2
