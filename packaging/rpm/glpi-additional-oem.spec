@@ -1,5 +1,5 @@
 Name:           glpi-additional-oem
-Version:        20260531
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Generate OEM-based GLPI Agent inventory identity data for systems with invalid DMI serials or UUIDs
 License:        GPL-3.0-or-later
@@ -66,5 +66,5 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 %{_unitdir}/glpi-agent.service.d/10-additional-oem.conf
 
 %changelog
-* Sun May 31 2026 snuglinux <snuglinux@users.noreply.github.com> - 20260531-1
+* Sun May 31 2026 snuglinux <snuglinux@users.noreply.github.com> - 0.1.1-1
 - Initial package

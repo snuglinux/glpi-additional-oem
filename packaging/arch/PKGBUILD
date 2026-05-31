@@ -1,5 +1,5 @@
 pkgname=glpi-additional-oem
-pkgver=20260531
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Generate OEM-based GLPI Agent inventory identity data for systems with invalid DMI serials or UUIDs"
 arch=('any')
