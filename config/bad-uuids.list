@@ -1,0 +1,8 @@
+# Bad / fake / template UUID list for glpi-additional-oem
+# One UUID per line. Empty lines and comments are ignored.
+
+00000000-0000-0000-0000-000000000000
+ffffffff-ffff-ffff-ffff-ffffffffffff
+
+# Gigabyte J3455N-D3H / common OEM template UUID
+03000200-0400-0500-0006-000700080009

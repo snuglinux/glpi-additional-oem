@@ -1,0 +1,51 @@
+# Bad / fake / OEM DMI values for glpi-additional-oem
+#
+# Supported formats:
+#   value                 -> bad value for any field
+#   field=value           -> bad value only for a specific DMI field
+#   /regex/               -> bad regex for any field, matched after lowercasing
+#   field:/regex/         -> bad regex only for a specific DMI field
+#
+# Known DMI fields used by the script:
+#   sys_vendor
+#   product_name
+#   product_serial
+#   product_uuid
+#   board_vendor
+#   board_name
+#   board_serial
+#
+# Built-in bad values already include:
+#   OEM, Default string, To be filled by O.E.M., System Serial Number,
+#   Base Board Serial Number, None, Unknown, Not specified, Not available,
+#   N/A, NA, NULL, all-zero strings, all-f strings.
+#
+# Add site-specific values below.
+
+# Generic bad OEM placeholders
+Default string
+To be filled by O.E.M.
+To be filled by OEM
+System Serial Number
+Base Board Serial Number
+Chassis Serial Number
+No Asset Information
+Not Specified
+Not Available
+Unknown
+None
+N/A
+NA
+NULL
+OEM
+
+# Field-specific examples
+product_serial=Default string
+board_serial=Default string
+product_name=Default string
+
+# Regex examples
+/^0+$/
+/^f+$/
+product_serial:/^serial number$/
+board_serial:/^base board serial number$/

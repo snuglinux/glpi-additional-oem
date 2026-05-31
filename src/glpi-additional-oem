@@ -1,0 +1,718 @@
+#!/usr/bin/env bash
+#
+# glpi-additional-oem
+#
+# Generate /run/glpi-agent/additional-content.json for GLPI Agent.
+#
+# Purpose:
+#   - ignore bad/OEM/template DMI values such as "Default string"
+#   - ignore bad/template UUIDs from an external list
+#   - if no usable serial exists, generate a controlled OEM-* serial from
+#     vendor + board model + physical MAC address
+#   - keep generated additional-content in /run so it is recreated after boot
+#
+# Output example:
+#   {
+#     "content": {
+#       "bios": {
+#         "mmanufacturer": "Gigabyte Technology Co., Ltd.",
+#         "mmodel": "J3455N-D3H",
+#         "ssn": "OEM-GIGABYTE-J3455N-D3H-AABBCC112233"
+#       }
+#     }
+#   }
+#
+
+set -euo pipefail
+
+PROGRAM="glpi-additional-oem"
+
+OUT="/run/glpi-agent/additional-content.json"
+RUN_DIR="/run/glpi-agent"
+
+CONFIG_DIR="/etc/glpi-additional-oem"
+BAD_UUIDS_FILE="$CONFIG_DIR/bad-uuids.list"
+BAD_VALUES_FILE="$CONFIG_DIR/bad-values.list"
+
+STATE_DIR="/var/lib/glpi-agent/glpi-additional-oem"
+FINGERPRINT_FILE="$STATE_DIR/hardware-fingerprint"
+GLPI_STATE_DIR="/var/lib/glpi-agent"
+
+RESET_AGENT_STATE=1
+DRY_RUN=0
+DEBUG=0
+SHOW_CONFIG=0
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  glpi-additional-oem [options]
+
+Options:
+  --dry-run          Print generated JSON to stdout, do not write files
+  --no-reset-state   Do not remove GLPI Agent last_state.json when hardware fingerprint changes
+  --debug            Print diagnostic information to stderr and syslog
+  --show-config      Show important paths
+  -h, --help         Show this help
+
+Files:
+  /etc/glpi-additional-oem/bad-uuids.list
+  /etc/glpi-additional-oem/bad-values.list
+  /run/glpi-agent/additional-content.json
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --no-reset-state)
+            RESET_AGENT_STATE=0
+            shift
+            ;;
+        --debug)
+            DEBUG=1
+            shift
+            ;;
+        --show-config)
+            SHOW_CONFIG=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "$SHOW_CONFIG" -eq 1 ]]; then
+    cat <<EOF_CONFIG
+PROGRAM=$PROGRAM
+OUT=$OUT
+RUN_DIR=$RUN_DIR
+CONFIG_DIR=$CONFIG_DIR
+BAD_UUIDS_FILE=$BAD_UUIDS_FILE
+BAD_VALUES_FILE=$BAD_VALUES_FILE
+STATE_DIR=$STATE_DIR
+FINGERPRINT_FILE=$FINGERPRINT_FILE
+GLPI_STATE_DIR=$GLPI_STATE_DIR
+EOF_CONFIG
+    exit 0
+fi
+
+log() {
+    local msg="$*"
+
+    if [[ "$DEBUG" -eq 1 ]]; then
+        echo "DEBUG: $msg" >&2
+    fi
+
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "$PROGRAM" "$msg" || true
+    fi
+}
+
+trim_string() {
+    local s="${1:-}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+lower_string() {
+    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+upper_string() {
+    printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]'
+}
+
+read_dmi() {
+    local name="$1"
+    local file="/sys/class/dmi/id/$name"
+    local value=""
+
+    [[ -r "$file" ]] || {
+        echo ""
+        return 0
+    }
+
+    value="$(tr -d '\000' < "$file" | tr '\r\n' ' ')"
+    trim_string "$value"
+}
+
+normalize_match_value() {
+    local s="${1:-}"
+    s="$(trim_string "$s")"
+    s="$(lower_string "$s")"
+    printf '%s' "$s"
+}
+
+strip_inline_comment() {
+    local s="${1:-}"
+    # Lines starting with # are comments. Inline comments are also allowed after whitespace.
+    s="$(printf '%s' "$s" | sed 's/[[:space:]]#.*$//')"
+    trim_string "$s"
+}
+
+# Match custom bad value from bad-values.list.
+# Supported formats:
+#   value
+#   field=value
+#   /regex/
+#   field:/regex/
+#
+# Examples:
+#   Default string
+#   product_serial=Default string
+#   board_serial=/^0+$/
+#   /^to be filled/
+value_in_bad_values_file() {
+    local field="$1"
+    local raw_value="$2"
+    local value line lhs rhs regex
+
+    value="$(normalize_match_value "$raw_value")"
+    [[ -z "$value" ]] && return 1
+    [[ -r "$BAD_VALUES_FILE" ]] || return 1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(strip_inline_comment "$line")"
+        [[ -z "$line" ]] && continue
+
+        # field:/regex/
+        if [[ "$line" =~ ^([^:=[:space:]]+):/(.*)/$ ]]; then
+            lhs="${BASH_REMATCH[1]}"
+            regex="${BASH_REMATCH[2]}"
+            lhs="$(normalize_match_value "$lhs")"
+            if [[ "$lhs" == "$(normalize_match_value "$field")" && "$value" =~ $regex ]]; then
+                return 0
+            fi
+            continue
+        fi
+
+        # /regex/
+        if [[ "$line" =~ ^/(.*)/$ ]]; then
+            regex="${BASH_REMATCH[1]}"
+            if [[ "$value" =~ $regex ]]; then
+                return 0
+            fi
+            continue
+        fi
+
+        # field=value
+        if [[ "$line" == *"="* ]]; then
+            lhs="${line%%=*}"
+            rhs="${line#*=}"
+            lhs="$(normalize_match_value "$lhs")"
+            rhs="$(normalize_match_value "$rhs")"
+            if [[ "$lhs" == "$(normalize_match_value "$field")" && "$rhs" == "$value" ]]; then
+                return 0
+            fi
+            continue
+        fi
+
+        # plain value
+        line="$(normalize_match_value "$line")"
+        if [[ "$line" == "$value" ]]; then
+            return 0
+        fi
+    done < "$BAD_VALUES_FILE"
+
+    return 1
+}
+
+is_bad_value_builtin() {
+    local raw="${1:-}"
+    local v
+
+    v="$(normalize_match_value "$raw")"
+    [[ -z "$v" ]] && return 0
+
+    case "$v" in
+        "oem"                                         |\
+        "default string"                              |\
+        "to be filled by o.e.m."                      |\
+        "to be filled by oem"                         |\
+        "system serial number"                        |\
+        "chassis serial number"                       |\
+        "base board serial number"                    |\
+        "none"                                        |\
+        "unknown"                                     |\
+        "not specified"                               |\
+        "not available"                               |\
+        "no asset information"                        |\
+        "n/a"                                         |\
+        "na"                                          |\
+        "null")
+            return 0
+            ;;
+    esac
+
+    [[ "$v" =~ ^0+$ ]] && return 0
+    [[ "$v" =~ ^f+$ ]] && return 0
+    [[ "$v" =~ ^x+$ ]] && return 0
+
+    return 1
+}
+
+is_bad_value() {
+    local field="$1"
+    local raw="$2"
+
+    is_bad_value_builtin "$raw" && return 0
+    value_in_bad_values_file "$field" "$raw" && return 0
+
+    return 1
+}
+
+uuid_in_bad_list() {
+    local raw="${1:-}"
+    local uuid line
+
+    uuid="$(normalize_match_value "$raw")"
+    [[ -z "$uuid" ]] && return 1
+    [[ -r "$BAD_UUIDS_FILE" ]] || return 1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(strip_inline_comment "$line")"
+        line="$(normalize_match_value "$line")"
+        [[ -z "$line" ]] && continue
+
+        if [[ "$line" == "$uuid" ]]; then
+            return 0
+        fi
+    done < "$BAD_UUIDS_FILE"
+
+    return 1
+}
+
+is_bad_uuid() {
+    local raw="${1:-}"
+    local v
+
+    v="$(normalize_match_value "$raw")"
+    [[ -z "$v" ]] && return 0
+
+    is_bad_value "product_uuid" "$v" && return 0
+    uuid_in_bad_list "$v" && return 0
+
+    if [[ ! "$v" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+sanitize_token() {
+    local value="${1:-}"
+
+    value="$(upper_string "$value")"
+    value="$(printf '%s' "$value" | sed 's/[^A-Z0-9]/-/g; s/-\+/-/g; s/^-//; s/-$//g')"
+
+    printf '%s' "$value"
+}
+
+vendor_alias() {
+    local vendor="${1:-}"
+    local v
+
+    v="$(upper_string "$vendor")"
+
+    case "$v" in
+        *GIGABYTE*)
+            echo "GIGABYTE"
+            ;;
+        *ASUSTEK*|*ASUS*)
+            echo "ASUS"
+            ;;
+        *MICRO-STAR*|*MSI*)
+            echo "MSI"
+            ;;
+        *HEWLETT*|*HP*)
+            echo "HP"
+            ;;
+        *LENOVO*)
+            echo "LENOVO"
+            ;;
+        *DELL*)
+            echo "DELL"
+            ;;
+        *ACER*)
+            echo "ACER"
+            ;;
+        *)
+            sanitize_token "$vendor"
+            ;;
+    esac
+}
+
+is_bad_mac() {
+    local mac="${1:-}"
+    local first_octet
+
+    mac="$(upper_string "$mac")"
+
+    [[ -z "$mac" ]] && return 0
+    [[ ! "$mac" =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){5}$ ]] && return 0
+    [[ "$mac" == "00:00:00:00:00:00" ]] && return 0
+    [[ "$mac" == "FF:FF:FF:FF:FF:FF" ]] && return 0
+
+    first_octet="${mac%%:*}"
+
+    # multicast MAC is not usable as a stable physical identifier
+    if (( (16#$first_octet & 1) == 1 )); then
+        return 0
+    fi
+
+    return 1
+}
+
+is_laa_mac() {
+    local mac="${1:-}"
+    local first_octet
+
+    mac="$(upper_string "$mac")"
+    first_octet="${mac%%:*}"
+
+    # Locally Administered Address
+    if (( (16#$first_octet & 2) == 2 )); then
+        return 0
+    fi
+
+    return 1
+}
+
+get_mac_from_ethtool() {
+    local iface="$1"
+    local mac=""
+
+    command -v ethtool >/dev/null 2>&1 || return 1
+
+    mac="$(ethtool -P "$iface" 2>/dev/null | awk -F': ' '/Permanent address/ {print toupper($2)}')"
+
+    if ! is_bad_mac "$mac"; then
+        echo "$mac"
+        return 0
+    fi
+
+    return 1
+}
+
+get_mac_from_sysfs() {
+    local iface="$1"
+    local path="/sys/class/net/$iface/address"
+    local mac=""
+
+    [[ -r "$path" ]] || return 1
+
+    mac="$(cat "$path" | tr '[:lower:]' '[:upper:]')"
+
+    if ! is_bad_mac "$mac"; then
+        echo "$mac"
+        return 0
+    fi
+
+    return 1
+}
+
+is_virtual_iface() {
+    local iface="$1"
+
+    case "$iface" in
+        lo|docker*|br-*|virbr*|veth*|tun*|tap*|wg*|tailscale*|zt*|vmnet*|vboxnet*|cni*|flannel*|kube*|podman*|dummy*|ifb*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+get_primary_physical_mac() {
+    local iface_path iface type mac
+    local best_wired=""
+    local best_wired_laa=""
+    local best_wifi=""
+    local best_wifi_laa=""
+
+    for iface_path in /sys/class/net/*; do
+        [[ -e "$iface_path" ]] || continue
+
+        iface="$(basename "$iface_path")"
+        is_virtual_iface "$iface" && continue
+
+        # A physical PCI/USB device usually has /device.
+        [[ -e "$iface_path/device" ]] || continue
+
+        type="$(cat "$iface_path/type" 2>/dev/null || echo "")"
+
+        mac="$(get_mac_from_ethtool "$iface" || true)"
+        if [[ -z "$mac" ]]; then
+            mac="$(get_mac_from_sysfs "$iface" || true)"
+        fi
+        [[ -z "$mac" ]] && continue
+
+        # type 1 = Ethernet, type 801 = Wi-Fi
+        case "$type" in
+            1)
+                if is_laa_mac "$mac"; then
+                    [[ -z "$best_wired_laa" ]] && best_wired_laa="$mac"
+                else
+                    [[ -z "$best_wired" ]] && best_wired="$mac"
+                fi
+                ;;
+            801)
+                if is_laa_mac "$mac"; then
+                    [[ -z "$best_wifi_laa" ]] && best_wifi_laa="$mac"
+                else
+                    [[ -z "$best_wifi" ]] && best_wifi="$mac"
+                fi
+                ;;
+            *)
+                if is_laa_mac "$mac"; then
+                    [[ -z "$best_wired_laa" ]] && best_wired_laa="$mac"
+                else
+                    [[ -z "$best_wired" ]] && best_wired="$mac"
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -n "$best_wired" ]]; then
+        echo "$best_wired"
+        return 0
+    fi
+    if [[ -n "$best_wifi" ]]; then
+        echo "$best_wifi"
+        return 0
+    fi
+    if [[ -n "$best_wired_laa" ]]; then
+        echo "$best_wired_laa"
+        return 0
+    fi
+    if [[ -n "$best_wifi_laa" ]]; then
+        echo "$best_wifi_laa"
+        return 0
+    fi
+
+    return 1
+}
+
+make_oem_serial() {
+    local vendor="$1"
+    local board="$2"
+    local mac="$3"
+    local v b m
+
+    v="$(vendor_alias "$vendor")"
+    b="$(sanitize_token "$board")"
+    m="$(upper_string "$mac" | tr -d ':')"
+
+    [[ -z "$v" ]] && v="UNKNOWNVENDOR"
+    [[ -z "$b" ]] && b="UNKNOWNBOARD"
+
+    echo "OEM-${v}-${b}-${m}"
+}
+
+json_escape() {
+    local s="${1:-}"
+
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\r'/}"
+    s="${s//$'\n'/\\n}"
+
+    printf '%s' "$s"
+}
+
+json_pair() {
+    local key="$1"
+    local value="$2"
+
+    printf '"%s":"%s"' "$(json_escape "$key")" "$(json_escape "$value")"
+}
+
+write_json() {
+    local out="$1"
+    local bios_count="${#BIOS_ITEMS[@]}"
+    local hardware_count="${#HARDWARE_ITEMS[@]}"
+    local section_count=0
+    local i
+
+    {
+        echo "{"
+        echo '  "content": {'
+
+        if (( bios_count > 0 )); then
+            echo '    "bios": {'
+            for i in "${!BIOS_ITEMS[@]}"; do
+                if (( i + 1 < bios_count )); then
+                    echo "      ${BIOS_ITEMS[$i]},"
+                else
+                    echo "      ${BIOS_ITEMS[$i]}"
+                fi
+            done
+            echo -n '    }'
+            section_count=$((section_count + 1))
+        fi
+
+        if (( hardware_count > 0 )); then
+            if (( section_count > 0 )); then
+                echo ","
+            fi
+            echo '    "hardware": {'
+            for i in "${!HARDWARE_ITEMS[@]}"; do
+                if (( i + 1 < hardware_count )); then
+                    echo "      ${HARDWARE_ITEMS[$i]},"
+                else
+                    echo "      ${HARDWARE_ITEMS[$i]}"
+                fi
+            done
+            echo -n '    }'
+            section_count=$((section_count + 1))
+        fi
+
+        echo
+        echo "  }"
+        echo "}"
+    } > "$out"
+}
+
+reset_agent_state_if_needed() {
+    local old_fp="$1"
+    local new_fp="$2"
+
+    [[ "$RESET_AGENT_STATE" -eq 1 ]] || return 0
+    [[ -n "$old_fp" ]] || return 0
+    [[ "$old_fp" != "$new_fp" ]] || return 0
+
+    log "Hardware fingerprint changed. Removing GLPI Agent last_state.json files."
+
+    if [[ -d "$GLPI_STATE_DIR" ]]; then
+        find "$GLPI_STATE_DIR" \
+            -maxdepth 4 \
+            -type f \
+            -name 'last_state.json' \
+            -print \
+            -delete 2>/dev/null || true
+    fi
+}
+
+if [[ "$DRY_RUN" -eq 0 && "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "ERROR: run as root to write /run and /var/lib files" >&2
+    exit 1
+fi
+
+sys_vendor="$(read_dmi sys_vendor)"
+product_name="$(read_dmi product_name)"
+product_serial="$(read_dmi product_serial)"
+product_uuid="$(read_dmi product_uuid)"
+board_vendor="$(read_dmi board_vendor)"
+board_name="$(read_dmi board_name)"
+board_serial="$(read_dmi board_serial)"
+
+primary_mac="$(get_primary_physical_mac || true)"
+
+log "DMI sys_vendor=$sys_vendor"
+log "DMI product_name=$product_name"
+log "DMI product_serial=$product_serial"
+log "DMI product_uuid=$product_uuid"
+log "DMI board_vendor=$board_vendor"
+log "DMI board_name=$board_name"
+log "DMI board_serial=$board_serial"
+log "Primary physical MAC=$primary_mac"
+
+BIOS_ITEMS=()
+HARDWARE_ITEMS=()
+
+if ! is_bad_value "sys_vendor" "$sys_vendor"; then
+    BIOS_ITEMS+=("$(json_pair "mmanufacturer" "$sys_vendor")")
+elif ! is_bad_value "board_vendor" "$board_vendor"; then
+    BIOS_ITEMS+=("$(json_pair "mmanufacturer" "$board_vendor")")
+fi
+
+if ! is_bad_value "board_name" "$board_name"; then
+    BIOS_ITEMS+=("$(json_pair "mmodel" "$board_name")")
+fi
+
+identity_serial=""
+
+if ! is_bad_value "product_serial" "$product_serial"; then
+    identity_serial="$product_serial"
+    BIOS_ITEMS+=("$(json_pair "ssn" "$identity_serial")")
+    log "Using real product_serial as bios.ssn: $identity_serial"
+elif ! is_bad_value "board_serial" "$board_serial"; then
+    identity_serial="$board_serial"
+    BIOS_ITEMS+=("$(json_pair "ssn" "$identity_serial")")
+    log "Using real board_serial as bios.ssn: $identity_serial"
+elif [[ -n "$primary_mac" ]]; then
+    identity_serial="$(make_oem_serial "${sys_vendor:-$board_vendor}" "$board_name" "$primary_mac")"
+    BIOS_ITEMS+=("$(json_pair "ssn" "$identity_serial")")
+    log "Using generated OEM serial as bios.ssn: $identity_serial"
+else
+    log "No usable serial and no physical MAC found. bios.ssn will not be generated."
+fi
+
+if ! is_bad_value "board_serial" "$board_serial"; then
+    if [[ "$board_serial" != "$identity_serial" ]]; then
+        BIOS_ITEMS+=("$(json_pair "msn" "$board_serial")")
+        log "Using real board_serial as bios.msn: $board_serial"
+    fi
+fi
+
+if ! is_bad_uuid "$product_uuid"; then
+    HARDWARE_ITEMS+=("$(json_pair "uuid" "$product_uuid")")
+    log "Using product_uuid as hardware.uuid: $product_uuid"
+else
+    log "Ignoring bad/suspicious product_uuid: $product_uuid"
+fi
+
+fingerprint="$identity_serial|$product_uuid|$sys_vendor|$board_vendor|$board_name|$primary_mac"
+
+old_fingerprint=""
+if [[ -r "$FINGERPRINT_FILE" ]]; then
+    old_fingerprint="$(cat "$FINGERPRINT_FILE" 2>/dev/null || true)"
+fi
+
+tmp_json="$(mktemp)"
+write_json "$tmp_json"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "===== DMI =====" >&2
+    echo "sys_vendor     = $sys_vendor" >&2
+    echo "product_name   = $product_name" >&2
+    echo "product_serial = $product_serial" >&2
+    echo "product_uuid   = $product_uuid" >&2
+    echo "board_vendor   = $board_vendor" >&2
+    echo "board_name     = $board_name" >&2
+    echo "board_serial   = $board_serial" >&2
+    echo "primary_mac    = $primary_mac" >&2
+    echo "identity_serial= $identity_serial" >&2
+    echo "bad_uuids_file = $BAD_UUIDS_FILE" >&2
+    echo "bad_values_file= $BAD_VALUES_FILE" >&2
+    echo >&2
+    cat "$tmp_json"
+    rm -f "$tmp_json"
+    exit 0
+fi
+
+mkdir -p "$RUN_DIR" "$STATE_DIR"
+reset_agent_state_if_needed "$old_fingerprint" "$fingerprint"
+
+install -m 0644 "$tmp_json" "$OUT"
+rm -f "$tmp_json"
+
+printf '%s\n' "$fingerprint" > "$FINGERPRINT_FILE"
+chmod 0644 "$FINGERPRINT_FILE"
+
+echo "OK: GLPI additional-content created: $OUT"
+echo "OK: identity_serial: ${identity_serial:-not generated}"
+echo "OK: primary_mac: ${primary_mac:-not found}"

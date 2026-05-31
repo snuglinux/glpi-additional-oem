@@ -1,0 +1,22 @@
+post_install() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  echo
+  echo "glpi-additional-oem installed."
+  echo "Check: sudo /usr/lib/glpi-agent/glpi-additional-oem --dry-run --debug"
+  echo "Apply: sudo systemctl restart glpi-agent"
+  echo
+}
+
+post_upgrade() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+post_remove() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  echo
+  echo "glpi-additional-oem removed."
+  echo "Apply: sudo systemctl restart glpi-agent"
+  echo
+}
