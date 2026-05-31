@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+#
+# glpi-additional-oem-disable-old
+#
+# Disable old active GLPI Agent additional-content directives so that
+# glpi-additional-oem can provide the single generated runtime file.
+#
+# It comments only active non-empty lines that do not point to:
+#   /run/glpi-agent/additional-content.json
+#
+# Example changed line:
+#   additional-content = /etc/glpi-agent/fix-uuid-ssn.json
+# becomes:
+#   # disabled by glpi-additional-oem: additional-content = /etc/glpi-agent/fix-uuid-ssn.json
+#
+
+set -euo pipefail
+
+PROGRAM="glpi-additional-oem-disable-old"
+CONF_DIR="/etc/glpi-agent"
+TARGET="/run/glpi-agent/additional-content.json"
+DRY_RUN=0
+DEBUG=0
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  glpi-additional-oem-disable-old [options]
+
+Options:
+  --conf-dir DIR   GLPI Agent config directory, default: /etc/glpi-agent
+  --target PATH    Expected additional-content target,
+                   default: /run/glpi-agent/additional-content.json
+  --dry-run        Show what would be changed without writing files
+  --debug          Print debug messages
+  -h, --help       Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --conf-dir)
+            [[ $# -ge 2 ]] || { echo "ERROR: --conf-dir requires a path" >&2; exit 1; }
+            CONF_DIR="$2"
+            shift 2
+            ;;
+        --target)
+            [[ $# -ge 2 ]] || { echo "ERROR: --target requires a path" >&2; exit 1; }
+            TARGET="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --debug)
+            DEBUG=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+log() {
+    local msg="$*"
+
+    [[ "$DEBUG" -eq 1 ]] && echo "DEBUG: $msg" >&2
+
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "$PROGRAM" "$msg" || true
+    fi
+}
+
+need_root_for_write() {
+    if [[ "$DRY_RUN" -eq 0 && "${EUID:-$(id -u)}" -ne 0 ]]; then
+        echo "ERROR: run as root or use --dry-run" >&2
+        exit 1
+    fi
+}
+
+process_file() {
+    local file="$1"
+    local tmp backup ts rc
+
+    [[ -f "$file" ]] || return 0
+    [[ -r "$file" ]] || return 0
+
+    tmp="$(mktemp)"
+
+    set +e
+    awk -v target="$TARGET" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function unquote(s) {
+            if (length(s) >= 2) {
+                first = substr(s, 1, 1)
+                last  = substr(s, length(s), 1)
+                if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+                    return substr(s, 2, length(s) - 2)
+                }
+            }
+            return s
+        }
+        BEGIN { changed = 0 }
+        {
+            original = $0
+
+            # Skip already commented lines.
+            if ($0 ~ /^[[:space:]]*#/) {
+                print original
+                next
+            }
+
+            if ($0 ~ /^[[:space:]]*additional-content[[:space:]]*=/) {
+                value = $0
+                sub(/^[[:space:]]*additional-content[[:space:]]*=[[:space:]]*/, "", value)
+                sub(/[[:space:]]*#.*/, "", value)
+                value = unquote(trim(value))
+
+                # Do not touch empty/default line or our expected target.
+                if (value != "" && value != target) {
+                    print "# disabled by glpi-additional-oem: " original
+                    changed = 1
+                    next
+                }
+            }
+
+            print original
+        }
+        END {
+            if (changed) {
+                exit 10
+            }
+        }
+    ' "$file" > "$tmp"
+    rc=$?
+    set -e
+
+    if [[ "$rc" -eq 10 ]]; then
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo "Would update: $file"
+            rm -f "$tmp"
+            return 0
+        fi
+
+        ts="$(date +%Y%m%d-%H%M%S)"
+        backup="${file}.glpi-additional-oem.bak-${ts}"
+
+        cp -a "$file" "$backup"
+        cat "$tmp" > "$file"
+        rm -f "$tmp"
+
+        log "Disabled old additional-content directives in $file; backup: $backup"
+        echo "Updated: $file"
+        echo "Backup : $backup"
+        return 0
+    fi
+
+    if [[ "$rc" -ne 0 ]]; then
+        rm -f "$tmp"
+        echo "ERROR: failed to process $file" >&2
+        return "$rc"
+    fi
+
+    rm -f "$tmp"
+    return 0
+}
+
+main() {
+    need_root_for_write
+
+    if [[ ! -d "$CONF_DIR" ]]; then
+        log "Config directory does not exist: $CONF_DIR"
+        return 0
+    fi
+
+    log "Scanning $CONF_DIR for old additional-content directives"
+
+    while IFS= read -r -d '' file; do
+        process_file "$file"
+    done < <(
+        find "$CONF_DIR" -maxdepth 2 -type f \
+            \( -name '*.cfg' -o -name 'agent.cfg' \) \
+            -print0 2>/dev/null
+    )
+}
+
+main "$@"

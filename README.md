@@ -44,6 +44,29 @@ Computer update (by name)
 
 Otherwise GLPI may still update the old asset by hostname.
 
+
+## Install behavior
+
+During package installation or upgrade, `glpi-additional-oem` comments old active
+`additional-content = ...` directives found in GLPI Agent configuration files,
+except the new managed target:
+
+```text
+/run/glpi-agent/additional-content.json
+```
+
+Changed files are backed up with suffix:
+
+```text
+.glpi-additional-oem.bak-YYYYMMDD-HHMMSS
+```
+
+Manual check:
+
+```bash
+sudo /usr/lib/glpi-agent/glpi-additional-oem-disable-old --dry-run --debug
+```
+
 ## Manual install
 
 ```bash

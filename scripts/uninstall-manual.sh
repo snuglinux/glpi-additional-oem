@@ -57,6 +57,7 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 rm -f "$PREFIX/lib/glpi-agent/glpi-additional-oem"
+rm -f "$PREFIX/lib/glpi-agent/glpi-additional-oem-disable-old"
 rm -f "$SYSTEMD_DIR/glpi-agent.service.d/10-additional-oem.conf"
 
 if [[ "$REMOVE_CONFIG" -eq 1 ]]; then

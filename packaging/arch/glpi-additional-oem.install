@@ -1,14 +1,17 @@
 post_install() {
+  /usr/lib/glpi-agent/glpi-additional-oem-disable-old || true
   systemctl daemon-reload >/dev/null 2>&1 || true
 
   echo
   echo "glpi-additional-oem installed."
+  echo "Old active additional-content directives were commented out where found."
   echo "Check: sudo /usr/lib/glpi-agent/glpi-additional-oem --dry-run --debug"
   echo "Apply: sudo systemctl restart glpi-agent"
   echo
 }
 
 post_upgrade() {
+  /usr/lib/glpi-agent/glpi-additional-oem-disable-old || true
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
 

@@ -1,5 +1,5 @@
 Name:           glpi-additional-oem
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Generate OEM-based GLPI Agent inventory identity data for systems with invalid DMI serials or UUIDs
 License:        GPL-3.0-or-later
@@ -32,6 +32,9 @@ missing, or template OEM DMI serials and UUIDs.
 install -Dm0755 src/glpi-additional-oem \
   %{buildroot}%{_prefix}/lib/glpi-agent/glpi-additional-oem
 
+install -Dm0755 src/glpi-additional-oem-disable-old \
+  %{buildroot}%{_prefix}/lib/glpi-agent/glpi-additional-oem-disable-old
+
 install -Dm0644 config/20-additional-oem.cfg \
   %{buildroot}%{_sysconfdir}/glpi-agent/conf.d/20-additional-oem.cfg
 
@@ -51,9 +54,11 @@ install -Dm0644 LICENSE \
   %{buildroot}%{_licensedir}/%{name}/LICENSE
 
 %post
+%{_prefix}/lib/glpi-agent/glpi-additional-oem-disable-old || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 cat <<'MSG'
 glpi-additional-oem installed.
+Old active additional-content directives were commented out where found.
 Check: sudo /usr/lib/glpi-agent/glpi-additional-oem --dry-run --debug
 Apply: sudo systemctl restart glpi-agent
 MSG
@@ -65,11 +70,15 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 %license %{_licensedir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/README.md
 %{_prefix}/lib/glpi-agent/glpi-additional-oem
+%{_prefix}/lib/glpi-agent/glpi-additional-oem-disable-old
 %config(noreplace) %{_sysconfdir}/glpi-agent/conf.d/20-additional-oem.cfg
 %config(noreplace) %{_sysconfdir}/glpi-additional-oem/bad-uuids.list
 %config(noreplace) %{_sysconfdir}/glpi-additional-oem/bad-values.list
 %{_unitdir}/glpi-agent.service.d/10-additional-oem.conf
 
 %changelog
+* Sun May 31 2026 snuglinux <snuglinux@users.noreply.github.com> - 0.1.2-1
+- Comment old active additional-content directives during install/upgrade
+
 * Sun May 31 2026 snuglinux <snuglinux@users.noreply.github.com> - 0.1.1-1
 - Initial package

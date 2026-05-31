@@ -19,12 +19,14 @@ Options:
   --systemd-dir PATH   Default: /usr/lib/systemd/system
   --no-systemd         Do not install systemd drop-in
   --restart-agent      Restart glpi-agent after install
+  --no-disable-old     Do not comment old additional-content directives
   -h, --help           Show help
 USAGE
 }
 
 INSTALL_SYSTEMD=1
 RESTART_AGENT=0
+DISABLE_OLD=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             RESTART_AGENT=1
             shift
             ;;
+        --no-disable-old)
+            DISABLE_OLD=0
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -68,6 +74,9 @@ fi
 install -Dm0755 "$ROOT_DIR/src/glpi-additional-oem" \
     "$PREFIX/lib/glpi-agent/glpi-additional-oem"
 
+install -Dm0755 "$ROOT_DIR/src/glpi-additional-oem-disable-old" \
+    "$PREFIX/lib/glpi-agent/glpi-additional-oem-disable-old"
+
 install -Dm0644 "$ROOT_DIR/config/20-additional-oem.cfg" \
     "$SYSCONFDIR/glpi-agent/conf.d/20-additional-oem.cfg"
 
@@ -84,6 +93,10 @@ if [[ "$INSTALL_SYSTEMD" -eq 1 ]]; then
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload || true
     fi
+fi
+
+if [[ "$DISABLE_OLD" -eq 1 ]]; then
+    "$PREFIX/lib/glpi-agent/glpi-additional-oem-disable-old" || true
 fi
 
 echo "OK: glpi-additional-oem installed"
