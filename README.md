@@ -34,6 +34,13 @@ OEM-GIGABYTE-J3455N-D3H-AABBCC112233
 
 from vendor, board model, and a physical MAC address.
 
+Since 0.1.4, if vendor and board model are also unusable but a valid MAC exists,
+it falls back to a MAC-only serial:
+
+```text
+OEM-MAC-AABBCC112233
+```
+
 ## Important GLPI note
 
 If SSDs are moved between computers, consider disabling or lowering the GLPI import rule:
@@ -66,6 +73,9 @@ Manual check:
 ```bash
 sudo /usr/lib/glpi-agent/glpi-additional-oem-disable-old --dry-run --debug
 ```
+
+Since 0.1.4, MAC detection also has a non-virtual interface fallback for systems
+where `/sys/class/net/<iface>/device` is not exposed.
 
 Since 0.1.3, the systemd drop-in runs the generator with `--only-if-enabled`:
 

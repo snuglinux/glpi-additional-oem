@@ -1,5 +1,5 @@
 Name:           glpi-additional-oem
-Version:        0.1.3
+Version:        0.1.4
 Release:        1%{?dist}
 Summary:        Generate OEM-based GLPI Agent inventory identity data for systems with invalid DMI serials or UUIDs
 License:        GPL-3.0-or-later
@@ -77,6 +77,10 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 %{_unitdir}/glpi-agent.service.d/10-additional-oem.conf
 
 %changelog
+* Sun May 31 2026 snuglinux <snuglinux@users.noreply.github.com> - 0.1.4-1
+- Add OEM-MAC fallback when DMI vendor/model values are unusable
+- Improve primary MAC detection with a non-virtual interface fallback
+
 * Sun May 31 2026 snuglinux <snuglinux@users.noreply.github.com> - 0.1.3-1
 - Add --only-if-enabled mode for systemd ExecStartPre
 - Skip JSON generation when additional-content config is commented or disabled

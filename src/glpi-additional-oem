@@ -9,6 +9,7 @@
 #   - ignore bad/template UUIDs from an external list
 #   - if no usable serial exists, generate a controlled OEM-* serial from
 #     vendor + board model + physical MAC address
+#   - if vendor/board model are also unusable, fall back to OEM-MAC-<MAC>
 #   - keep generated additional-content in /run so it is recreated after boot
 #
 # Output example:
@@ -21,6 +22,9 @@
 #       }
 #     }
 #   }
+#
+# Last-resort example when all DMI names are unusable but MAC is available:
+#   OEM-MAC-AABBCC112233
 #
 
 set -euo pipefail
@@ -493,11 +497,13 @@ is_virtual_iface() {
 }
 
 get_primary_physical_mac() {
-    local iface_path iface type mac
+    local iface_path iface type mac has_device
     local best_wired=""
     local best_wired_laa=""
     local best_wifi=""
     local best_wifi_laa=""
+    local best_any=""
+    local best_any_laa=""
 
     for iface_path in /sys/class/net/*; do
         [[ -e "$iface_path" ]] || continue
@@ -505,16 +511,27 @@ get_primary_physical_mac() {
         iface="$(basename "$iface_path")"
         is_virtual_iface "$iface" && continue
 
-        # A physical PCI/USB device usually has /device.
-        [[ -e "$iface_path/device" ]] || continue
-
         type="$(cat "$iface_path/type" 2>/dev/null || echo "")"
+        has_device=0
+        [[ -e "$iface_path/device" ]] && has_device=1
 
         mac="$(get_mac_from_ethtool "$iface" || true)"
         if [[ -z "$mac" ]]; then
             mac="$(get_mac_from_sysfs "$iface" || true)"
         fi
         [[ -z "$mac" ]] && continue
+
+        # Prefer devices that expose /sys/class/net/<iface>/device, but keep a
+        # safe last-resort fallback for older/minimal systems where sysfs does
+        # not expose that path even for the real NIC.
+        if [[ "$has_device" -ne 1 ]]; then
+            if is_laa_mac "$mac"; then
+                [[ -z "$best_any_laa" ]] && best_any_laa="$mac"
+            else
+                [[ -z "$best_any" ]] && best_any="$mac"
+            fi
+            continue
+        fi
 
         # type 1 = Ethernet, type 801 = Wi-Fi
         case "$type" in
@@ -558,6 +575,14 @@ get_primary_physical_mac() {
         echo "$best_wifi_laa"
         return 0
     fi
+    if [[ -n "$best_any" ]]; then
+        echo "$best_any"
+        return 0
+    fi
+    if [[ -n "$best_any_laa" ]]; then
+        echo "$best_any_laa"
+        return 0
+    fi
 
     return 1
 }
@@ -572,10 +597,22 @@ make_oem_serial() {
     b="$(sanitize_token "$board")"
     m="$(upper_string "$mac" | tr -d ':')"
 
-    [[ -z "$v" ]] && v="UNKNOWNVENDOR"
-    [[ -z "$b" ]] && b="UNKNOWNBOARD"
+    if [[ -z "$m" ]]; then
+        echo ""
+        return 1
+    fi
 
-    echo "OEM-${v}-${b}-${m}"
+    # Last-resort mode for systems where vendor and board model are also OEM
+    # placeholders, for example both are "Default string".
+    if [[ -z "$v" && -z "$b" ]]; then
+        echo "OEM-MAC-${m}"
+    elif [[ -z "$v" ]]; then
+        echo "OEM-${b}-${m}"
+    elif [[ -z "$b" ]]; then
+        echo "OEM-${v}-${m}"
+    else
+        echo "OEM-${v}-${b}-${m}"
+    fi
 }
 
 json_escape() {
@@ -709,6 +746,20 @@ if ! is_bad_value "board_name" "$board_name"; then
 fi
 
 identity_serial=""
+oem_vendor=""
+oem_board=""
+
+if ! is_bad_value "sys_vendor" "$sys_vendor"; then
+    oem_vendor="$sys_vendor"
+elif ! is_bad_value "board_vendor" "$board_vendor"; then
+    oem_vendor="$board_vendor"
+fi
+
+if ! is_bad_value "board_name" "$board_name"; then
+    oem_board="$board_name"
+elif ! is_bad_value "product_name" "$product_name"; then
+    oem_board="$product_name"
+fi
 
 if ! is_bad_value "product_serial" "$product_serial"; then
     identity_serial="$product_serial"
@@ -719,9 +770,13 @@ elif ! is_bad_value "board_serial" "$board_serial"; then
     BIOS_ITEMS+=("$(json_pair "ssn" "$identity_serial")")
     log "Using real board_serial as bios.ssn: $identity_serial"
 elif [[ -n "$primary_mac" ]]; then
-    identity_serial="$(make_oem_serial "${sys_vendor:-$board_vendor}" "$board_name" "$primary_mac")"
-    BIOS_ITEMS+=("$(json_pair "ssn" "$identity_serial")")
-    log "Using generated OEM serial as bios.ssn: $identity_serial"
+    identity_serial="$(make_oem_serial "$oem_vendor" "$oem_board" "$primary_mac")"
+    if [[ -n "$identity_serial" ]]; then
+        BIOS_ITEMS+=("$(json_pair "ssn" "$identity_serial")")
+        log "Using generated OEM serial as bios.ssn: $identity_serial"
+    else
+        log "No usable serial and OEM serial generation failed. bios.ssn will not be generated."
+    fi
 else
     log "No usable serial and no physical MAC found. bios.ssn will not be generated."
 fi
@@ -760,6 +815,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "board_name     = $board_name" >&2
     echo "board_serial   = $board_serial" >&2
     echo "primary_mac    = $primary_mac" >&2
+    echo "oem_vendor     = $oem_vendor" >&2
+    echo "oem_board      = $oem_board" >&2
     echo "identity_serial= $identity_serial" >&2
     echo "bad_uuids_file = $BAD_UUIDS_FILE" >&2
     echo "bad_values_file= $BAD_VALUES_FILE" >&2
