@@ -134,3 +134,15 @@ packaging/rpm/glpi-additional-oem.spec
 /usr/lib/systemd/system/glpi-agent.service.d/10-additional-oem.conf
 /run/glpi-agent/additional-content.json
 ```
+
+### Build RPM
+
+```bash
+./packaging/rpm/build-rpm.sh
+```
+
+For source RPM only:
+
+```bash
+./packaging/rpm/build-rpm.sh --srpm
+```

@@ -20,6 +20,8 @@ check:
 	bash -n src/glpi-additional-oem
 	bash -n scripts/install-manual.sh
 	bash -n scripts/uninstall-manual.sh
+	bash -n scripts/build-rpm.sh
+	bash -n packaging/rpm/build-rpm.sh
 
 dist:
 	tar --exclude='.git' -czf glpi-additional-oem.tar.gz .
