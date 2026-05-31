@@ -7,6 +7,11 @@ URL:            https://github.com/snuglinux/glpi-additional-oem
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
+# Some RPM environments (ClearOS/RHEL minimal builds) do not define %{_unitdir}
+# unless systemd RPM macros are installed. Keep a safe fallback.
+%{!?_unitdir:%global _unitdir /usr/lib/systemd/system}
+%{!?_licensedir:%global _licensedir %{_datadir}/licenses}
+
 Requires:       bash
 Requires:       glpi-agent
 Requires:       ethtool
